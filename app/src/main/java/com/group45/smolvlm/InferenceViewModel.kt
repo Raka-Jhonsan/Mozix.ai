@@ -24,10 +24,10 @@ enum class QualityMode(
     val description: String,
     val maxTokens:   Int
 ) {
-    FAST    ("Fast",     numFrames = 8,  topK = 2,  emoji = "⚡", description = "8 Frames (Top 2) · Fast",   maxTokens = 80),
-    BALANCED("Balanced", numFrames = 16, topK = 6,  emoji = "⚖️", description = "16 Frames (Top 6) · Good",   maxTokens = 200),
-    ACCURATE("Accurate", numFrames = 24, topK = 8,  emoji = "🎯", description = "24 Frames (Top 8) · High",   maxTokens = 350),
-    ULTRA   ("Ultra",    numFrames = 32, topK = 12, emoji = "🔬", description = "32 Frames (Top 12) · Max",   maxTokens = 500)
+    FAST    ("Fast",     numFrames = 12, topK = 4,  emoji = "⚡", description = "12 Frames (Top 4) · Fast",   maxTokens = 80),
+    BALANCED("Balanced", numFrames = 16, topK = 6,  emoji = "⚖️", description = "16 Frames (Top 6) · Good",   maxTokens = 150),
+    ACCURATE("Accurate", numFrames = 24, topK = 8,  emoji = "🎯", description = "24 Frames (Top 8) · High",   maxTokens = 250),
+    ULTRA   ("Ultra",    numFrames = 32, topK = 12, emoji = "🔬", description = "32 Frames (Top 12) · Max",   maxTokens = 400)
 }
 
 // ── App Theme ──────────────────────────────────────────────────────────────────
@@ -39,9 +39,9 @@ enum class AppTheme(val label: String, val emoji: String) {
 
 // ── Answer Length Preference ──────────────────────────────────────────────────
 enum class AnswerLength(val label: String, val emoji: String, val maxTokens: Int, val instruction: String) {
-    SHORT ("Short",    "✂️",  80,  "Answer in one short sentence."),
-    MEDIUM("Medium",   "📝",  200,  "Provide a concise answer."),
-    LONG  ("Detailed", "📖",  450, "Provide a detailed description.")
+    SHORT ("Short",    "✂️",  60,  "Answer in one short sentence."),
+    MEDIUM("Medium",   "📝",  120, "Provide a concise answer."),
+    LONG  ("Detailed", "📖",  300, "Provide a detailed description.")
 }
 
 class InferenceViewModel(app: Application) : AndroidViewModel(app) {
@@ -235,7 +235,11 @@ class InferenceViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun runOnVideo(uri: Uri, question: String, mode: QualityMode, ans: AnswerLength, history: List<Pair<String, String>>) {
-        val effectiveTokens = maxOf(mode.maxTokens, ans.maxTokens)
+        // FIX: cap effectiveTokens so Ultra/Accurate modes don't pass 300-400 tokens
+        // and blow past the sentence-level early-stop guard in the engine.
+        // maxTokens in QualityMode are aspirational upper bounds; actual output length
+        // is controlled by MAX_SENTENCES (3 sentences). Cap at 120 to keep responses focused.
+        val effectiveTokens = minOf(maxOf(mode.maxTokens, ans.maxTokens), 120)
         _homeState.value = UiState.Loading("Extracting ${mode.numFrames} frames…")
         _homeProgress.value = 0.1f
 
@@ -245,10 +249,11 @@ class InferenceViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 engine.setMode(mode.numFrames, mode.topK, effectiveTokens)
                 val result = engine.runOnVideo(
-                    videoUri = uri, 
-                    question = question, 
+                    videoUri = uri,
+                    question = question,
                     history = history,
                     instruction = ans.instruction,
+                    temperature = 0.1f, // Precise video analysis
                     onStatus = { msg -> _homeState.value = UiState.Loading(msg) },
                     onToken = { token -> _homePartialResult.value += token }
                 )
@@ -320,10 +325,11 @@ class InferenceViewModel(app: Application) : AndroidViewModel(app) {
 
                 engine.setMode(1, 1, ans.maxTokens)
                 val result = engine.runOnImage(
-                    bitmap = bmp, 
-                    question = question, 
+                    bitmap = bmp,
+                    question = question,
                     history = history,
                     instruction = ans.instruction,
+                    temperature = 0.1f, // Precise image analysis
                     onStatus = { msg -> _homeState.value = UiState.Loading(msg) },
                     onToken = { token -> _homePartialResult.value += token }
                 )
@@ -385,14 +391,15 @@ class InferenceViewModel(app: Application) : AndroidViewModel(app) {
         liveJob = viewModelScope.launch(Dispatchers.IO) {
             val startMs = System.currentTimeMillis()
             try {
-                // Use more frames for better context in Live mode
-                engine.setMode(frames.size, topK = frames.size.coerceAtMost(3), maxTokens = liveMaxTokens)
+                // topK = 2 is enough for quick live identification
+                engine.setMode(frames.size, topK = 2, maxTokens = liveMaxTokens)
                 val result = engine.runOnFrameList(
-                    frames = frames, 
-                    question = question, 
-                    history = history, 
-                    instruction = "Be accurate and concise. ${ans.instruction}",
+                    frames = frames,
+                    question = question,
+                    history = history,
+                    instruction = "Answer as concisely as possible. ${ans.instruction}",
                     startTimeMs = startMs,
+                    temperature = 0.2f, // Lower temperature for more stable live output
                     onStatus = { msg -> _liveState.value = UiState.Loading(msg) },
                     onToken = { token -> _livePartialResult.value += token }
                 )
@@ -466,18 +473,19 @@ class InferenceViewModel(app: Application) : AndroidViewModel(app) {
                         _isNarratorScanning.value = true
                         val frames = getFrames()
                         _isNarratorScanning.value = false
-                        
+
                         if (frames.isNotEmpty()) {
                             val currentQuery = narrationQueries[queryIndex % narrationQueries.size]
                             queryIndex++
-                            
-                            engine.setMode(frames.size, topK = 1, maxTokens = 50)
+
+                            engine.setMode(frames.size, topK = 2, maxTokens = 80)
                             val result = engine.runOnFrameList(
-                                frames = frames, 
-                                question = currentQuery, 
+                                frames = frames,
+                                question = currentQuery,
                                 history = emptyList(),
-                                instruction = "Answer concisely in one short sentence.",
-                                isNarrator = true
+                                instruction = "Describe strictly and concisely in one sentence.",
+                                isNarrator = true,
+                                temperature = 0.3f // More factual narrator
                             )
                             if (result is InferenceResult.Success) {
                                 withContext(Dispatchers.Main) {
@@ -574,7 +582,13 @@ class InferenceViewModel(app: Application) : AndroidViewModel(app) {
             mode = entry.mode,
             tokensGenerated = entry.answer.split(" ").size
         )
-        _currentChatHistory.value = entry.fullHistory ?: listOf(entry.question to entry.answer)
+        // FIX: do NOT restore fullHistory into _currentChatHistory.
+        // Previously restoring an old entry loaded its entire Q&A history into the active chat
+        // state. The next runInference() call then passed that stale history (including completely
+        // unrelated questions like "count the word the") into the engine as the `history` param,
+        // causing it to answer the old question instead of the new video. Restored entries are
+        // display-only — chat context must always start fresh for the next query.
+        _currentChatHistory.value = emptyList()
     }
 
     override fun onCleared() {
