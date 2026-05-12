@@ -71,7 +71,6 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
-import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.core.content.ContextCompat
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -148,7 +147,6 @@ fun vibrate(context: Context) {
 class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     private lateinit var tts: TextToSpeech
     override fun onCreate(savedInstanceState: Bundle?) {
-        installSplashScreen()
         super.onCreate(savedInstanceState)
         tts = TextToSpeech(this, this)
         setContent { SmolVLMApp(tts) }
@@ -475,7 +473,6 @@ fun HomeScreen(tts: TextToSpeech, vm: InferenceViewModel, tc: ThemeColors) {
 @Composable
 fun LiveScreen(tts: TextToSpeech, vm: InferenceViewModel, tc: ThemeColors) {
     val state by vm.liveState.collectAsState()
-    val progress by vm.liveProgress.collectAsState()
     val isNarrating by vm.isNarrating.collectAsState()
     val isScanning by vm.isNarratorScanning.collectAsState()
     val narratorText by vm.narratorText.collectAsState()
@@ -486,7 +483,7 @@ fun LiveScreen(tts: TextToSpeech, vm: InferenceViewModel, tc: ThemeColors) {
     val haptic = LocalHapticFeedback.current
     val density = LocalDensity.current
 
-    // Pulsing animation for Narrator
+    // Pulsing animation for Navigation mode
     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
     val alpha by infiniteTransition.animateFloat(
         initialValue = 0.5f,
@@ -507,7 +504,6 @@ fun LiveScreen(tts: TextToSpeech, vm: InferenceViewModel, tc: ThemeColors) {
         label = "scale"
     )
 
-    var question by remember { mutableStateOf("") }
     val previewView = remember { PreviewView(context) }
     var imageCapture: ImageCapture? by remember { mutableStateOf(null) }
     var camera: Camera? by remember { mutableStateOf(null) }
@@ -519,10 +515,6 @@ fun LiveScreen(tts: TextToSpeech, vm: InferenceViewModel, tc: ThemeColors) {
         ActivityResultContracts.RequestPermission()
     ) { isGranted ->
         hasCameraPermission = isGranted
-    }
-
-    val speechLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
-        r.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()?.let { question = it }
     }
 
     LaunchedEffect(Unit) {
@@ -564,8 +556,6 @@ fun LiveScreen(tts: TextToSpeech, vm: InferenceViewModel, tc: ThemeColors) {
         camera?.cameraControl?.setLinearZoom(zoomLevel)
     }
 
-    val scope = rememberCoroutineScope()
-
     Box(Modifier.fillMaxSize()) {
         if (!hasCameraPermission) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -580,7 +570,7 @@ fun LiveScreen(tts: TextToSpeech, vm: InferenceViewModel, tc: ThemeColors) {
                     .semantics { contentDescription = "Live camera feed" }
             )
 
-            // Scanning Line Animation for Narrator
+            // Scanning Line Animation for Navigation Mode
             if (isScanning) {
                 val scanTransition = rememberInfiniteTransition(label = "scan")
                 val translateY by scanTransition.animateFloat(
@@ -621,12 +611,12 @@ fun LiveScreen(tts: TextToSpeech, vm: InferenceViewModel, tc: ThemeColors) {
         }
 
         // Zoom Slider Overlay (Centered on the right edge)
-        if (hasCameraPermission && state !is UiState.Done) {
+        if (hasCameraPermission) {
             Box(
                 modifier = Modifier
                     .fillMaxHeight()
                     .padding(end = 2.dp)
-                    .offset(x=9.dp)// Optimized distance from edge
+                    .offset(x=9.dp)
                     .align(Alignment.CenterEnd),
                 contentAlignment = Alignment.Center
             ) {
@@ -669,7 +659,7 @@ fun LiveScreen(tts: TextToSpeech, vm: InferenceViewModel, tc: ThemeColors) {
             }
         }
 
-        // Narrator Text Overlay
+        // Navigation Text Overlay
         if (isNarrating && narratorText.isNotEmpty()) {
             Box(
                 modifier = Modifier
@@ -717,17 +707,17 @@ fun LiveScreen(tts: TextToSpeech, vm: InferenceViewModel, tc: ThemeColors) {
         // UI Overlay
         Column(
             modifier = Modifier.fillMaxSize().padding(20.dp),
-            verticalArrangement = Arrangement.SpaceBetween
+            verticalArrangement = Arrangement.Top
         ) {
             // Top Header
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Surface(
-                        color = if (state is UiState.Loading) Color.Red.copy(alpha = 0.8f) else Color.Black.copy(alpha = 0.5f),
+                        color = if (isScanning) Color.Red.copy(alpha = 0.8f) else Color.Black.copy(alpha = 0.5f),
                         shape = RoundedCornerShape(12.dp)
                     ) {
                         Text(
-                            if (state is UiState.Loading) "AI ANALYSING…" else "LIVE VISION · READY",
+                            if (isScanning) "ANALYSING SCENE…" else "LIVE VISION · READY",
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
                             color = Color.White,
                             fontWeight = FontWeight.Bold,
@@ -757,7 +747,7 @@ fun LiveScreen(tts: TextToSpeech, vm: InferenceViewModel, tc: ThemeColors) {
                     }
                 }
 
-                // Narrator Toggle
+                // Navigation Mode Toggle
                 Surface(
                     color = if (isNarrating) tc.accent.copy(alpha = alpha) else Color.Black.copy(alpha = 0.5f),
                     shape = RoundedCornerShape(12.dp),
@@ -775,9 +765,7 @@ fun LiveScreen(tts: TextToSpeech, vm: InferenceViewModel, tc: ThemeColors) {
                             }
                             vm.toggleNarration(
                                 getFrames = {
-                                    // Visual/Tactile feedback that a capture is starting
                                     vibrate(context)
-
                                     val newFrames = mutableListOf<Bitmap>()
                                     val executor = ContextCompat.getMainExecutor(context)
                                     for (i in 1..2) {
@@ -809,144 +797,13 @@ fun LiveScreen(tts: TextToSpeech, vm: InferenceViewModel, tc: ThemeColors) {
                         )
                         Spacer(Modifier.width(8.dp))
                         Text(
-                            text = if (isScanning) "SCANNING…" else if (isNarrating) "NARRATOR ON" else "NARRATOR OFF",
+                            text = if (isScanning) "SCANNING…" else if (isNarrating) "NAVIGATION ON" else "NAVIGATION OFF",
                             color = if (isNarrating) tc.onAccent else Color.White,
                             fontWeight = FontWeight.Bold,
                             fontSize = 12.sp
                         )
                     }
                 }
-            }
-
-            // Bottom Section
-            val liveSessionFrames = remember { mutableStateListOf<Bitmap>() }
-            var isWatching by remember { mutableStateOf(false) }
-
-            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                if (state is UiState.Done) {
-                    LiveResultSection(
-                        vm = vm, 
-                        result = (state as UiState.Done).result, 
-                        question = question, 
-                        tc = tc, 
-                        context = context, 
-                        tts = tts, 
-                        onClear = {
-                            tts.stop()
-                            liveSessionFrames.clear()
-                            question = ""
-                            vm.resetLive()
-                        },
-                        onWatchMore = {
-                            tts.stop()
-                            vm.resetLiveStateOnly() 
-                        }
-                    )
-                }
-
-                if (state is UiState.Loading) {
-                    LiveLoadingSection(state as UiState.Loading, progress, tc, vm)
-                } else if (state !is UiState.Done) {
-                    Surface(color = tc.card.copy(alpha = 0.95f), shape = RoundedCornerShape(24.dp), border = BorderStroke(1.dp, tc.accent.copy(alpha = 0.5f))) {
-                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                            
-                            OutlinedTextField(
-                                value = question,
-                                onValueChange = { question = it },
-                                modifier = Modifier.fillMaxWidth(),
-                                placeholder = { Text("What am I looking at?", color = tc.sub) },
-                                textStyle = androidx.compose.ui.text.TextStyle(color = tc.text),
-                                trailingIcon = {
-                    IconButton(onClick = {
-                    vibrate(context)
-                    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                    }
-                    speechLauncher.launch(intent)
-                }) { Icon(Icons.Filled.Mic, null, tint = tc.accent) }
-                                },
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedTextColor = tc.text, 
-                                    unfocusedTextColor = tc.text,
-                                    focusedBorderColor = tc.accent,
-                                    unfocusedBorderColor = tc.sub.copy(alpha = 0.3f)
-                                )
-                            )
-
-                            Button(
-                                onClick = {
-                                    vibrate(context)
-                                    isWatching = true
-                                    focusManager.clearFocus()
-                                    tts.stop()
-                                    vm.setLiveStatus("Capturing Live Feed…", 0.1f)
-
-                                    val job = scope.launch(Dispatchers.IO) {
-                                        val executor = ContextCompat.getMainExecutor(context)
-                                        // Capture a few frames for context
-                                        val newFrames = mutableListOf<Bitmap>()
-                                        var capturedCount = 0
-                                        while (capturedCount < 3) {
-                                            if (!isActive) break
-                                            val deferred = kotlinx.coroutines.CompletableDeferred<Bitmap>()
-                                            imageCapture?.takePicture(executor, object : ImageCapture.OnImageCapturedCallback() {
-                                                override fun onCaptureSuccess(image: ImageProxy) {
-                                                    deferred.complete(image.toBitmap())
-                                                    image.close()
-                                                }
-                                                override fun onError(exception: ImageCaptureException) {
-                                                    deferred.completeExceptionally(exception)
-                                                }
-                                            })
-                                            try {
-                                                val bmp = deferred.await()
-                                                newFrames.add(bmp)
-                                                capturedCount++
-                                                delay(500)
-                                            } catch (_: Exception) { break }
-                                        }
-                                        
-                                        if (isActive && newFrames.isNotEmpty()) {
-                                            liveSessionFrames.addAll(newFrames)
-                                            vm.runOnLiveVideo(liveSessionFrames.toList(), question, vm.currentChatHistory.value)
-                                        }
-                                        isWatching = false
-                                    }
-                                    vm.setLiveCaptureJob(job)
-                                },
-                                modifier = Modifier.fillMaxWidth().height(56.dp),
-                                enabled = question.isNotBlank() && imageCapture != null && !isWatching,
-                                shape = RoundedCornerShape(16.dp),
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = tc.accent,
-                                    contentColor = tc.onAccent,
-                                    disabledContainerColor = tc.accent.copy(alpha = 0.2f),
-                                    disabledContentColor = tc.onAccent.copy(alpha = 0.5f)
-                                )
-                            ) {
-                                Icon(Icons.Default.PlayArrow, null)
-                                Spacer(Modifier.width(12.dp))
-                                Text(if (liveSessionFrames.isEmpty()) "Start Watching" else "Watch More", fontWeight = FontWeight.Bold)
-                            }
-
-                            if (liveSessionFrames.isNotEmpty() && !isWatching) {
-                                OutlinedButton(
-                                    onClick = {
-                                        vibrate(context)
-                                        liveSessionFrames.clear()
-                                        question = ""
-                                        vm.resetLive()
-                                    },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    border = BorderStroke(1.dp, tc.sub)
-                                ) {
-                                    Text("Clear All", color = tc.text)
-                                }
-                            }
-                        }
-                    }
-                }
-                Spacer(Modifier.height(12.dp)) // Extra safety margin at the bottom
             }
         }
     }
@@ -1421,13 +1278,7 @@ fun LiveResultSection(vm: InferenceViewModel, result: InferenceResult.Success, q
             }
 
             // Chat History
-            Column(
-                modifier = Modifier
-                    .padding(vertical = 8.dp)
-                    .heightIn(max = 300.dp)
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
+            Column(Modifier.padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 chatHistory.forEach { pair ->
                     Column {
                         Text("Q: ${pair.first}", fontSize = 14.sp, color = tc.sub)
@@ -2066,21 +1917,13 @@ fun CameraChoiceDialog(tc: ThemeColors, context: Context, photoLauncher: android
                 Text("Select Input", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = tc.text)
                 Button(onClick = {
                     vibrate(context)
-                    if (androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                        val uri = androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.provider", java.io.File(context.cacheDir, "cam_${System.currentTimeMillis()}.jpg"))
-                        onPhoto(uri); photoLauncher.launch(uri); onDismiss()
-                    } else {
-                        android.widget.Toast.makeText(context, "Camera permission required", android.widget.Toast.LENGTH_SHORT).show()
-                    }
+                    val uri = androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.provider", java.io.File(context.cacheDir, "cam_${System.currentTimeMillis()}.jpg"))
+                    onPhoto(uri); photoLauncher.launch(uri); onDismiss()
                 }, modifier = Modifier.fillMaxWidth()) { Text("📷 Take Photo") }
                 OutlinedButton(onClick = {
                     vibrate(context)
-                    if (androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                        val uri = androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.provider", java.io.File(context.cacheDir, "vid_${System.currentTimeMillis()}.mp4"))
-                        onVideo(uri); videoLauncher.launch(uri); onDismiss()
-                    } else {
-                        android.widget.Toast.makeText(context, "Camera permission required", android.widget.Toast.LENGTH_SHORT).show()
-                    }
+                    val uri = androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.provider", java.io.File(context.cacheDir, "vid_${System.currentTimeMillis()}.mp4"))
+                    onVideo(uri); videoLauncher.launch(uri); onDismiss()
                 }, modifier = Modifier.fillMaxWidth()) { Text("🎬 Record Video") }
             }
         }
@@ -2124,7 +1967,6 @@ fun QualityDialog(current: QualityMode, tc: ThemeColors, onDismiss: () -> Unit, 
                         }
                     }
                 }
-                Spacer(Modifier.height(12.dp)) // Extra safety margin at the bottom
             }
         }
     }
