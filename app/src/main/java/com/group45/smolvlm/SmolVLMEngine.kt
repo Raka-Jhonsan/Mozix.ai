@@ -31,7 +31,7 @@ class SmolVLMEngine(private val context: Context) {
         const val NUM_FRAMES       = 16
         const val TOP_K            = 4
         const val IMAGE_SIZE       = 512
-        const val MAX_NEW_TOKENS   = 150
+        const val MAX_NEW_TOKENS   = 80
         const val TOKENS_PER_IMAGE = 64
         const val EMBED_DIM        = 960
 
@@ -141,20 +141,20 @@ class SmolVLMEngine(private val context: Context) {
             val token = tokenizerData.vocab.entries.firstOrNull { it.value == id.toInt() }?.key
                 ?: tokenizerData.addedTokens.entries.firstOrNull { it.value == id.toInt() }?.key
                 ?: continue
-            
+
             // Allow essential tokens, but skip meta-structure tokens
             if (token.startsWith("<") && token.endsWith(">")) {
                 if (token != "<|endoftext|>" && !token.contains("utterance")) {
-                     continue
+                    continue
                 }
             }
-            
+
             val bytes = token.mapNotNull { c -> UNICODE_TO_BYTES[c] }.map { it.toByte() }.toByteArray()
-            try { 
+            try {
                 val decoded = String(bytes, Charsets.UTF_8)
                 sb.append(decoded)
-            } catch (_: Exception) { 
-                sb.append(token) 
+            } catch (_: Exception) {
+                sb.append(token)
             }
         }
         return sb.toString().trim()
@@ -172,8 +172,7 @@ class SmolVLMEngine(private val context: Context) {
     private val imStartId:   Long by lazy { tokenizerData.addedTokens["<|im_start|>"]?.toLong()            ?: 1L }
     private val imEndId:     Long by lazy { tokenizerData.addedTokens["<|im_end|>"]?.toLong()              ?: 2L }
     private val fakeTokenId: Long by lazy { tokenizerData.addedTokens["<fake_token_around_image>"]?.toLong() ?: 49189L }
-    // GPT-2 BPE: \n byte 10 -> unicode 'Ċ' in vocab (fallback id 198)
-    private val newlineId:   Long by lazy { tokenizerData.vocab["Ċ"]?.toLong() ?: 198L }
+    private val newlineId:   Long by lazy { encodeText("\n").firstOrNull()?.toLong() ?: 198L }
 
     // ── MappedByteBuffer for embed_tokens.bin ─────────────────────────────
 
@@ -200,8 +199,7 @@ class SmolVLMEngine(private val context: Context) {
     init {
         val opts = OrtSession.SessionOptions().apply {
             try { addNnapi() } catch (_: Exception) { /* ignore */ }
-            // Increase threads for faster computation on modern multi-core CPUs
-            setIntraOpNumThreads(4)
+            setIntraOpNumThreads(2)
         }
         clipSession    = loadModel("clip_vision.onnx",             opts)
         visionSession  = loadModel("vision_encoder_q4.onnx",       opts)
@@ -216,14 +214,8 @@ class SmolVLMEngine(private val context: Context) {
 
     private fun loadModel(assetName: String, opts: OrtSession.SessionOptions): OrtSession {
         val cacheFile = java.io.File(context.cacheDir, assetName)
-        // Only copy if it doesn't exist to speed up startup significantly
-        if (!cacheFile.exists()) {
-            context.assets.open(assetName).use { input ->
-                cacheFile.outputStream().use { output ->
-                    input.copyTo(output, 65536)
-                }
-            }
-        }
+        if (cacheFile.exists()) cacheFile.delete()
+        context.assets.open(assetName).use { it.copyTo(cacheFile.outputStream(), 8192) }
         return env.createSession(cacheFile.absolutePath, opts)
     }
 
@@ -244,14 +236,39 @@ class SmolVLMEngine(private val context: Context) {
 
     // ── Public API ─────────────────────────────────────────────────────────
 
-    fun runOnVideo(videoUri: Uri, question: String, history: List<Pair<String, String>> = emptyList(), instruction: String = "", isNarrator: Boolean = false, onStatus: (String) -> Unit = {}, onToken: (String) -> Unit = {}): InferenceResult {
+    fun runOnVideo(
+        videoUri:    Uri,
+        question:    String,
+        history:     List<Pair<String, String>> = emptyList(),
+        instruction: String = "",
+        isNarrator:  Boolean = false,
+        temperature: Float = 0.2f,
+        topP:        Float = 0.9f,
+        onStatus:    (String) -> Unit = {},
+        onToken:     (String) -> Unit = {}
+    ): InferenceResult {
         val t0 = System.currentTimeMillis()
         val frames = extractFrames(videoUri)
         if (frames.isEmpty()) return InferenceResult.Error("Could not extract frames")
-        return runOnFrameList(frames, question, history, instruction, isNarrator, t0, onStatus, onToken)
+        return runOnFrameList(
+            frames, question, history, instruction, isNarrator,
+            startTimeMs = t0, temperature = temperature, topP = topP,
+            onStatus = onStatus, onToken = onToken
+        )
     }
 
-    fun runOnFrameList(frames: List<Bitmap>, question: String, history: List<Pair<String, String>> = emptyList(), instruction: String = "", isNarrator: Boolean = false, startTimeMs: Long = System.currentTimeMillis(), onStatus: (String) -> Unit = {}, onToken: (String) -> Unit = {}): InferenceResult {
+    fun runOnFrameList(
+        frames:      List<Bitmap>,
+        question:    String,
+        history:     List<Pair<String, String>> = emptyList(),
+        instruction: String = "",
+        isNarrator:  Boolean = false,
+        startTimeMs: Long = System.currentTimeMillis(),
+        temperature: Float = 0.2f,
+        topP:        Float = 0.9f,
+        onStatus:    (String) -> Unit = {},
+        onToken:     (String) -> Unit = {}
+    ): InferenceResult {
         shouldStopGeneration = false
         onStatus("Extracting features…")
         val embeddings   = frames.map { getClipEmbedding(it) }
@@ -263,13 +280,15 @@ class SmolVLMEngine(private val context: Context) {
         onStatus("Selecting key frames…")
         val topKIdx        = selectFrames(features)
         val selectedFrames = topKIdx.map { frames[it] }
-        
+
         onStatus("Encoding vision…")
-        // Frames were already scaled to IMAGE_SIZE in extractFrames
         val visionEmbeds   = selectedFrames.map { getVisionEmbedding(it) }
-        
+
         onStatus("Thinking…")
-        val answer         = decodeAnswer(visionEmbeds, question, history, instruction, isNarrator, onToken)
+        val answer = decodeAnswer(
+            visionEmbeds, question, history, instruction, isNarrator,
+            temperature = temperature, topP = topP, onToken = onToken
+        )
 
         // Recycle frames to free memory
         frames.forEach { it.recycle() }
@@ -282,14 +301,27 @@ class SmolVLMEngine(private val context: Context) {
         )
     }
 
-    fun runOnImage(bitmap: Bitmap, question: String, history: List<Pair<String, String>> = emptyList(), instruction: String = "", isNarrator: Boolean = false, onStatus: (String) -> Unit = {}, onToken: (String) -> Unit = {}): InferenceResult {
+    fun runOnImage(
+        bitmap:      Bitmap,
+        question:    String,
+        history:     List<Pair<String, String>> = emptyList(),
+        instruction: String = "",
+        isNarrator:  Boolean = false,
+        temperature: Float = 0.1f,
+        topP:        Float = 0.9f,
+        onStatus:    (String) -> Unit = {},
+        onToken:     (String) -> Unit = {}
+    ): InferenceResult {
         shouldStopGeneration = false
         val t0           = System.currentTimeMillis()
         onStatus("Encoding vision…")
         val scaled       = Bitmap.createScaledBitmap(bitmap, IMAGE_SIZE, IMAGE_SIZE, true)
         val visionEmbeds = listOf(getVisionEmbedding(scaled))
         onStatus("Thinking…")
-        val answer       = decodeAnswer(visionEmbeds, question, history, instruction, isNarrator, onToken)
+        val answer = decodeAnswer(
+            visionEmbeds, question, history, instruction, isNarrator,
+            temperature = temperature, topP = topP, onToken = onToken
+        )
         return InferenceResult.Success(
             answer         = answer,
             selectedFrames = listOf(0),
@@ -333,11 +365,11 @@ class SmolVLMEngine(private val context: Context) {
         val tensor = OnnxTensor.createTensor(env, FloatBuffer.wrap(data), longArrayOf(1L, 3L, 224L, 224L))
         val output = clipSession.run(mapOf("pixel_values" to tensor))
         val result = extractFloatArray(output[0].value)
-        
+
         // Cleanup
         tensor.close(); runCatching { output.close() }
         if (scaled != bitmap) scaled.recycle()
-        
+
         return result
     }
 
@@ -366,7 +398,7 @@ class SmolVLMEngine(private val context: Context) {
             "pixel_attention_mask" to maskTensor
         ))
         val result = flattenVisionOutput(output[0].value)
-        
+
         // Cleanup
         pixelTensor.close(); maskTensor.close(); runCatching { output.close() }
         if (scaled != bitmap) scaled.recycle()
@@ -375,18 +407,23 @@ class SmolVLMEngine(private val context: Context) {
     }
 
     private fun flattenVisionOutput(value: Any?): FloatArray {
-        return when (value) {
-            is Array<*> -> {
-                val batch = value[0]
-                if (batch is Array<*>) {
-                    val dim  = (batch[0] as? FloatArray)?.size ?: EMBED_DIM
-                    val flat = FloatArray(batch.size * dim)
-                    batch.forEachIndexed { i, row -> (row as FloatArray).copyInto(flat, i * dim) }
-                    flat
-                } else FloatArray(TOKENS_PER_IMAGE * EMBED_DIM)
+        val flatList = mutableListOf<Float>()
+        fun traverse(v: Any?) {
+            when (v) {
+                is FloatArray -> v.forEach { flatList.add(it) }
+                is Array<*>   -> v.forEach { traverse(it) }
+                is Float      -> flatList.add(v)
             }
-            else -> FloatArray(TOKENS_PER_IMAGE * EMBED_DIM)
         }
+        traverse(value)
+        val result = flatList.toFloatArray()
+
+        // Sanity check for token count (expecting TOKENS_PER_IMAGE * EMBED_DIM)
+        if (result.size != TOKENS_PER_IMAGE * EMBED_DIM) {
+            Log.w("SmolVLM", "Vision output size mismatch: expected ${TOKENS_PER_IMAGE * EMBED_DIM}, got ${result.size}")
+        }
+
+        return result
     }
 
     private fun extractFloatArray(value: Any?): FloatArray {
@@ -435,7 +472,30 @@ class SmolVLMEngine(private val context: Context) {
         val output = mlpSession.run(mapOf("features" to tensor))
         val scores = (output[0].value as FloatArray).copyOf()
         tensor.close(); runCatching { output.close() }
-        return scores.indices.sortedByDescending { scores[it] }.take(minOf(currentTopK, n)).sorted()
+
+        // Quality Enhancement: Effective Diversity Filter
+        // We ensure frames are at least ~10% of the video duration apart
+        // to avoid near-identical consecutive frames being selected.
+        val indexedScores = scores.mapIndexed { i, s -> i to s }.sortedByDescending { it.second }
+        val selected = mutableListOf<Int>()
+        val minDistance = maxOf(1, n / 10)
+
+        for (pair in indexedScores) {
+            if (selected.size >= currentTopK) break
+            if (selected.none { abs(it - pair.first) < minDistance }) {
+                selected.add(pair.first)
+            }
+        }
+
+        // Fallback if diversity filter is too strict
+        if (selected.size < minOf(currentTopK, n)) {
+            for (pair in indexedScores) {
+                if (selected.size >= currentTopK) break
+                if (!selected.contains(pair.first)) selected.add(pair.first)
+            }
+        }
+
+        return selected.sorted()
     }
 
     // ── Cleanup ────────────────────────────────────────────────────────────
@@ -456,7 +516,7 @@ class SmolVLMEngine(private val context: Context) {
             // Faster lookup using the 'present.i.key' naming convention seen in logcat
             val keyName = "present.$i.key"
             val valName = "present.$i.value"
-            
+
             val keyIdx = decoderOutputIndexMap[keyName]
             val valIdx = decoderOutputIndexMap[valName]
 
@@ -469,7 +529,7 @@ class SmolVLMEngine(private val context: Context) {
                     .firstOrNull { (name, _) -> name.contains(".$i.key") }?.value
                 val fuzzyValIdx = decoderOutputIndexMap.entries
                     .firstOrNull { (name, _) -> name.contains(".$i.value") }?.value
-                
+
                 if (fuzzyKeyIdx != null && fuzzyValIdx != null) {
                     keys.add(tensorToFloatArray(output[fuzzyKeyIdx].value))
                     values.add(tensorToFloatArray(output[fuzzyValIdx].value))
@@ -578,15 +638,12 @@ class SmolVLMEngine(private val context: Context) {
 
     // ── Sampling Decoder ───────────────────────────────────────────────────
 
-    private fun sampleToken(logits: FloatArray, temperature: Float = 0.0f, topK: Int = 40): Int {
+    private fun sampleToken(logits: FloatArray, temperature: Float = 0.0f, topK: Int = 40, topP: Float = 0.9f): Int {
         if (temperature <= 0.0f) {
             var maxIdx = 0
             var maxVal = -Float.MAX_VALUE
             for (i in logits.indices) {
-                if (logits[i] > maxVal) {
-                    maxVal = logits[i]
-                    maxIdx = i
-                }
+                if (logits[i] > maxVal) { maxVal = logits[i]; maxIdx = i }
             }
             return maxIdx
         }
@@ -594,7 +651,7 @@ class SmolVLMEngine(private val context: Context) {
         val softmax = FloatArray(logits.size)
         var maxLogit = -Float.MAX_VALUE
         for (l in logits) if (l > maxLogit) maxLogit = l
-        
+
         var sum = 0f
         for (i in logits.indices) {
             softmax[i] = kotlin.math.exp(((logits[i] - maxLogit) / temperature).toDouble()).toFloat()
@@ -602,57 +659,85 @@ class SmolVLMEngine(private val context: Context) {
         }
         for (i in softmax.indices) softmax[i] /= sum
 
-        // Top-K filtering
-        val indexed = softmax.mapIndexed { i, v -> i to v }.sortedByDescending { it.second }.take(topK)
-        val topSum = indexed.sumOf { it.second.toDouble() }.toFloat()
-        
-        val r = (0..1000).random() / 1000f * topSum
-        var acc = 0f
+        // Quality Enhancement: Combined Top-K and Top-P filtering
+        val indexed = softmax.mapIndexed { i, v -> i to v }.sortedByDescending { it.second }
+
+        // Apply Top-P (Nucleus)
+        var cumulativeP = 0f
+        val nucleus = mutableListOf<Pair<Int, Float>>()
         for (pair in indexed) {
+            nucleus.add(pair)
+            cumulativeP += pair.second
+            if (cumulativeP >= topP) break
+        }
+
+        // Take min of Top-K and Nucleus
+        val finalCandidates = nucleus.take(topK)
+        val finalSum = finalCandidates.sumOf { it.second.toDouble() }.toFloat()
+
+        val r = (0..1000).random() / 1000f * finalSum
+        var acc = 0f
+        for (pair in finalCandidates) {
             acc += pair.second
             if (acc >= r) return pair.first
         }
-        return indexed.first().first
+        return finalCandidates.first().first
     }
 
-    private fun decodeAnswer(visionEmbeds: List<FloatArray>, question: String, history: List<Pair<String, String>> = emptyList(), instruction: String = "", isNarrator: Boolean = false, onToken: (String) -> Unit): String {
+    private fun decodeAnswer(
+        visionEmbeds: List<FloatArray>,
+        question:     String,
+        history:      List<Pair<String, String>> = emptyList(),
+        instruction:  String = "",
+        isNarrator:   Boolean = false,
+        temperature:  Float = 0.2f,
+        topP:         Float = 0.9f,
+        onToken:      (String) -> Unit
+    ): String {
         return try {
-            val promptIds = buildChatTokenSequence(visionEmbeds, question, history, instruction, isNarrator)
+            val promptIds    = buildChatTokenSequence(visionEmbeds, question, history, instruction, isNarrator)
             val promptEmbeds = idsToEmbeds(promptIds)
             val seqLen       = promptEmbeds.size / EMBED_DIM
-            
+            Log.d("SmolVLM", "Prompt length: $seqLen tokens (${visionEmbeds.size} images)")
+
             val prefillResult = runDecoderStep(promptEmbeds, seqLen, 0, null)
             var cache         = prefillResult.cache
 
-            val generated = mutableListOf<Long>()
-            // Only penalize tokens as they are generated to avoid loops
-            val penaltyIds = mutableSetOf<Long>()
+            val generated  = mutableListOf<Long>()
+            val penaltyIds = mutableListOf<Long>()
 
-            var nextToken = sampleToken(prefillResult.logits, temperature = 0.0f).toLong()
+            var nextToken = sampleToken(prefillResult.logits, temperature = temperature, topP = topP).toLong()
             var pos       = seqLen
 
             var stepCount = 0
             while (stepCount < currentMaxTokens && nextToken !in eosIds && !shouldStopGeneration) {
                 generated.add(nextToken)
                 penaltyIds.add(nextToken)
-                
+
                 val currentText = decodeTokens(listOf(nextToken))
                 onToken(currentText)
 
+                // Quality Enhancement: Sentence guard prevents runaway repetition loops
+                val fullSoFar = decodeTokens(generated)
+                val sentences = fullSoFar.count { it == '.' || it == '!' || it == '?' }
+                if (sentences >= 5) break // Allow slightly longer, more detailed descriptions
+
                 val step  = runDecoderStep(getTokenEmbedding(nextToken), 1, pos, cache)
                 cache     = step.cache
-                
-                // Safer repetition penalty
+
+                // Quality Enhancement: Balanced Presence + Frequency Penalty
+                // We reduce these to avoid making the model speak unnaturally
                 val logits = step.logits
-                for (id in penaltyIds) {
+                val counts = penaltyIds.groupingBy { it }.eachCount()
+                for ((id, count) in counts) {
                     val idx = id.toInt()
                     if (idx in logits.indices) {
-                        if (logits[idx] > 0) logits[idx] /= 1.1f
-                        else logits[idx] *= 1.1f
+                        // Presence penalty (0.6) + Frequency penalty (0.2 * count)
+                        logits[idx] -= (0.6f + count * 0.2f)
                     }
                 }
 
-                nextToken = sampleToken(logits, temperature = 0.0f).toLong()
+                nextToken = sampleToken(logits, temperature = temperature, topP = topP).toLong()
                 pos++
                 stepCount++
             }
@@ -665,19 +750,19 @@ class SmolVLMEngine(private val context: Context) {
     }
 
     private fun buildChatTokenSequence(visionEmbeds: List<FloatArray>, question: String, history: List<Pair<String, String>> = emptyList(), instruction: String = "", isNarrator: Boolean = false): List<Any> {
-        val sequence = mutableListOf<Any>() 
+        val sequence = mutableListOf<Any>()
 
         fun nl() = sequence.add(newlineId)
         fun tok(t: String) = encodeText(t).forEach { sequence.add(it.toLong()) }
         fun special(id: Long) = sequence.add(id)
 
-        // System turn
+        // System turn: Precise instruction for high quality
         special(imStartId); tok("system"); nl()
         if (isNarrator) {
-            tok("Describe the scene naturally and concisely. Focus on the most important objects and people.")
+            tok("You are a direct visual narrator. Describe the scene accurately based ONLY on what you see. Be factual and do not speculate.")
         } else {
             val type = if (visionEmbeds.size > 1) "video" else "image"
-            tok("You are a helpful visual assistant. Identify objects accurately in the $type and answer the user's questions based strictly on visual evidence.")
+            tok("You are a visual assistant. Answer the user question based on the provided $type. Only report what is clearly visible. Be direct and concise.")
         }
         special(imEndId); nl()
 
@@ -693,33 +778,32 @@ class SmolVLMEngine(private val context: Context) {
             }
             special(fakeTokenId)
         }
+        nl()
 
-        if (history.isEmpty()) {
+        // History: Hard cap at 2 turns to maintain focus
+        val safeHistory = history.takeLast(2)
+        if (safeHistory.isEmpty()) {
             var q = question
-            if (instruction.isNotEmpty()) q += " ($instruction)"
+            if (instruction.isNotEmpty()) q = "$q ($instruction)"
             tok(q)
             special(imEndId); nl()
         } else {
-            // First history turn
-            special(imStartId); tok("user"); nl()
-            tok(history.first().first)
-            special(imEndId); nl()
-            special(imStartId); tok("assistant"); nl(); tok(history.first().second); special(imEndId); nl()
-
-            // Subsequent history turns
-            for (i in 1 until history.size) {
-                val (q, a) = history[i]
-                special(imStartId); tok("user"); nl(); tok(q); special(imEndId); nl()
+            for (i in safeHistory.indices) {
+                val (q, a) = safeHistory[i]
+                if (i == 0) {
+                    tok(q)
+                    special(imEndId); nl()
+                } else {
+                    special(imStartId); tok("user"); nl(); tok(q); special(imEndId); nl()
+                }
                 special(imStartId); tok("assistant"); nl(); tok(a); special(imEndId); nl()
             }
 
-            // Current question
             var q = question
-            if (instruction.isNotEmpty()) q += " ($instruction)"
+            if (instruction.isNotEmpty()) q = "$q ($instruction)"
             special(imStartId); tok("user"); nl(); tok(q); special(imEndId); nl()
         }
 
-        // Assistant turn start
         special(imStartId); tok("assistant"); nl()
 
         return sequence
