@@ -16,11 +16,11 @@
 
 Mozix.ai is a production-oriented Android application that runs a full Vision-Language Model (VLM) pipeline entirely on-device — no internet connection, no cloud server, no data leaving the phone.
 
-Built for **Blind & Low-Vision (BLV) users**, the app lets users point their camera at any scene, ask a question by voice, and hear a spoken answer within ~1.83 seconds on a flagship Android device. It achieves this through a novel **GRPO-trained MLP frame selector** that reduces input tokens by 78.3% before the expensive VLM inference step, delivering a **3.07× latency speedup** over naive 50-frame baselines while losing less than 3% accuracy on MVBench benchmarks.
+Built for **Blind & Low-Vision (BLV) users**, the app lets users point their camera at any scene, ask a question by voice, and hear a spoken answer within ~20-30 seconds on a flagship Android device. It achieves this through a novel **GRPO-trained MLP frame selector** that reduces input tokens by 78.3% before the expensive VLM inference step, delivering a **3.07× latency speedup** over naive 50-frame baselines while losing less than 3% accuracy on MVBench benchmarks.
 
 ---
 
-## Key Results
+## Key Results(Compared on GPU)
 
 | Metric | Baseline (50 frames) | Mozix Pipeline | Improvement |
 |---|---|---|---|
