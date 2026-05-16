@@ -236,11 +236,11 @@ git lfs ls-files
 
 ---
 
-## Performance Notes
+## Performance Notes(fast quality mode)
 
-- **Flagship (Snapdragon 8 Gen 3):** ~1.6–2.0s end-to-end
-- **Mid-range (Snapdragon 7 Gen 1):** ~3.5–4.5s
-- **Budget (2021 device):** ~8–15s
+- **Flagship (Snapdragon 8 Gen 3):** ~15–30s end-to-end
+- **Mid-range (Snapdragon 7 Gen 1):** ~20–40s
+- **Budget (2021 device):** ~40–50s
 
 Optimisations already applied:
 - INT4 quantization on vision encoder and decoder (4× size reduction vs FP32)
