@@ -25,7 +25,7 @@ Built for **Blind & Low-Vision (BLV) users**, the app lets users point their cam
 | Metric | Baseline (50 frames) | Mozix Pipeline | Improvement |
 |---|---|---|---|
 | Avg tokens | 2,932 | 593 | 78.3% reduction |
-| Avg latency | 4.32s | 1.83s | 3.07× speedup |
+| Avg latency | 5.5s | 1.83s | 3.07× speedup |
 | Accuracy loss | — | ≤3% | on action tasks |
 | Frames used | 50 | 8 (Top-K) | 84% fewer |
 | Active RAM | — | 325 MB | on-device heap |
