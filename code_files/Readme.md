@@ -1,252 +1,169 @@
-# Code Files – Mozix.ai
+# Mozix.ai — GRPO Training Code
 
-This directory contains the research, training, and model-export code used in the **Mozix.ai** project. It implements a Group Relative Policy Optimization (GRPO)-based frame selection mechanism designed to improve the efficiency of video understanding using Vision-Language Models (VLMs).
+This folder contains the Python training and selector-export code for the frame-selection component used by the Mozix.ai Android app.
 
-The primary objective of these scripts is to select the most relevant video frames before passing them to the SmolVLM2 model, reducing computational overhead while maintaining answer accuracy.
+The Android implementation in `app/src/main/java/com/group45/smolvlm/SmolVLMEngine.kt` is the deployment reference. The Python feature pipeline and selector are designed to match that contract; the Android Kotlin files and VLM ONNX assets are not modified by the training workflow.
 
-## 1. Overview
-
-Mozix.ai uses a lightweight Multi-Layer Perceptron (MLP) trained with GRPO to identify informative video frames.
-
-The frame selection pipeline combines:
-
-- **CLIP ViT-B/32:** Extracts visual embeddings from video frames.
-- **Motion features:** Provide additional temporal information for frame selection.
-- **GRPO-trained MLP:** Estimates the relevance of individual frames.
-- **SmolVLM2-500M:** Evaluates selected frames and generates answers to visual questions.
-
-The trained frame selector helps reduce the number of frames processed by the vision-language model, improving inference efficiency for on-device deployment.
-
-## 2. Directory Structure
+## Files
 
 ```text
 code_files/
-│
-├── export_all.py
-│
-├── grpo_selector.py
-│
-├── nb2_training.ipynb
-│
-├── grpo_mlp_final.pt
-│
+├── components.py          # Shared sampling, features, MLP, GRPO loss and reward
+├── nb2_training.ipynb     # Two-stage MVBench training and optional evaluation
+├── grpo_mlp_final.pt      # Existing trained selector checkpoint
+├── export_selector.py     # Exports only frame_selector.onnx
+├── requirements.txt       # Python dependencies
 └── Readme.md
 ```
 
-## 3. File Descriptions
+The old `grpo_selector.py` duplicated the selector with a 512-dimensional input, which did not match the Android app. The old `export_all.py` exported an incomplete SmolVLM2 graph and could overwrite assets whose interfaces are specific to the Android runtime. Both have been removed. The app's existing model assets are kept separately under `app/src/main/assets/`.
 
-### 3.1 `grpo_selector.py`
+## Android compatibility contract
 
-This file implements the GRPO-based frame selection architecture.
+The app processes video frames in this order:
 
-It contains:
+1. Sample a configurable number of frames uniformly from the video.
+2. Resize sampled frames to 512 × 512.
+3. Extract a 512-dimensional, L2-normalized CLIP visual-projection feature for each frame.
+4. Compute one normalized RGB frame-difference motion score per frame.
+5. Concatenate the CLIP feature and motion score into a **513-dimensional** feature vector.
+6. Run the MLP and select Top-K frames using greedy temporal diversity.
 
-- **FrameSelectorMLP:** A lightweight neural network that predicts frame-selection probabilities.
-- **GRPOFrameSelector:** Handles candidate generation, frame ranking, and selection.
-- **generate_candidates():** Generates candidate frame subsets for policy optimization.
-- **select():** Selects the top-K frames based on predicted probabilities.
-- **compute_mcq_reward():** Calculates the reward based on multiple-choice question accuracy.
-- **grpo_loss():** Implements the GRPO policy optimization objective.
-- **train_grpo():** Trains the frame selection network using feedback from SmolVLM2.
-- **GRPOQueryAwarePipeline:** Provides a query-aware inference pipeline.
-
-The MLP uses a three-layer architecture:
+The selector architecture is:
 
 ```text
-Input Features
-      |
-      v
-Linear Layer
-512 → 256
-      |
-     GELU
-      |
-      v
-Linear Layer
-256 → 64
-      |
-     GELU
-      |
-      v
-Linear Layer
-64 → 1
-      |
-    Sigmoid
-      |
-      v
-Frame Selection Probability
+513 → 256 → GELU → 64 → GELU → 1 → Sigmoid
 ```
 
-The standalone implementation defaults to 512-dimensional CLIP embeddings. The training notebook also contains a 513-dimensional feature configuration that incorporates a motion score.
+It has 148,097 trainable parameters. During training, CLIP and SmolVLM2 are frozen; only the MLP is optimized.
 
-### 3.2 `nb2_training.ipynb`
+### Feature details
 
-This notebook implements the two-stage training procedure for the GRPO-based frame selector.
+- **CLIP:** RGB square resize to 224 × 224 with bilinear filtering, CLIP mean/std normalization, `CLIPModel.vision_model(...).pooler_output`, then `visual_projection` and L2 normalization. Output shape: `(T, 512)`. This follows the preprocessing in the Kotlin engine.
+- **Motion:** RGB absolute pixel difference between adjacent frames after nearest-neighbour resizing to at most 64 × 64; frame 0 receives 0; scores are normalized by the maximum. Output shape: `(T,)`.
+- **Combined features:** `[CLIP_512, motion_1]`. Output shape: `(T, 513)`.
 
-It uses the MVBench dataset and a frozen SmolVLM2 model to provide reward signals during training.
+Python samples 32 frames by default and square-resizes them to 512 × 512, like the app's default Ultra pool. OpenCV frame-index sampling approximates Android's timestamp/nearest-sync-frame extraction; exact decoded frames may differ slightly between platforms.
 
-**Stage 1 – Action Recognition**
+### Frame-selection rule
 
-- Dataset: MVBench `action_antonym`
-- Focus: Identifying action-relevant frames in short video clips.
-- Training epochs: 2
-- Learning rate: 1e-4
+The app sorts frames by selector score, greedily accepts a frame only when it is at least `max(1, N // 10)` indices away from previously selected frames, then fills any remaining slots from the ranked list. `components.select_diverse_indices()` mirrors this rule. GRPO training candidates use the same temporal-diversity constraint.
 
-**Stage 2 – Navigation Fine-tuning**
+## Training
 
-- Dataset: MVBench `egocentric_navigation`
-- Focus: Improving frame selection for navigation and temporal reasoning tasks.
-- Training epochs: 3
-- Learning rate: 5e-5
+### 1. Prepare the environment
 
-**Feature Extraction Process**
+Use a Python environment with a PyTorch build appropriate for your CPU/GPU. Install the listed packages:
 
-1. Uniformly sample 32 frames from each video.
-2. Apply perceptual hash (pHash) deduplication.
-3. Extract 512-dimensional CLIP visual embeddings.
-4. Append a motion score to obtain 513-dimensional feature vectors.
-5. Generate candidate frame subsets.
-6. Evaluate candidates using SmolVLM2.
-7. Calculate rewards using multiple-choice answer accuracy.
-8. Update the MLP policy using the GRPO loss.
+```bash
+pip install -r requirements.txt
+```
 
-The final trained model is saved as:
+The training machine must also have local copies of:
+
+- SmolVLM2-500M
+- CLIP ViT-B/32
+- MVBench JSON files and the corresponding video folders
+
+### 2. Configure paths
+
+Open `nb2_training.ipynb` and update the paths in its configuration cell:
+
+- `MODEL_PATH`
+- `CLIP_PATH`
+- `DATA_ROOT`
+- Action JSON/video paths
+- Navigation JSON/video paths
+
+The defaults reflect the original project workstation layout and will need changing on another machine.
+
+### 3. Run the notebook
+
+Run the notebook cells in order. It:
+
+1. Loads and freezes SmolVLM2 and CLIP once.
+2. Loads the `action_antonym` and `egocentric_navigation` MVBench samples.
+3. Samples frames and extracts app-aligned 513-dimensional features.
+4. Trains on action-antonym (default: 2 epochs, learning rate 1e-4).
+5. Fine-tunes the same selector on navigation (default: 3 epochs, learning rate 5e-5).
+6. Saves stage and final PyTorch checkpoints.
+
+Expected outputs:
 
 ```text
+grpo_mlp_stage1_ep1.pt
+grpo_mlp_stage1_ep2.pt
+grpo_mlp_stage1.pt
+grpo_mlp_final_ep1.pt
+...
 grpo_mlp_final.pt
 ```
 
-### 3.3 `grpo_mlp_final.pt`
+The final checkpoint is a PyTorch state dict for `FrameSelectorMLP(input_dim=513)`. The notebook includes an optional **in-sample sanity evaluation**; it is not a held-out benchmark. Use a separate validation split for reportable accuracy. A baseline/SMI comparison is not included here because the corresponding `query_and_baseline_clean.py` pipelines are not part of this repository.
 
-This file contains the trained PyTorch weights of the GRPO frame selection MLP.
+### Training notes
 
-It is used to initialize the trained frame selector during inference and ONNX model export.
+- The notebook no longer applies pHash deduplication: the Android app does not perform that preprocessing, so retaining it would change the temporal positions and feature distribution seen by the selector.
+- Training samples use a 32-frame pool by default. The Android app's runtime quality modes use different frame counts and Top-K budgets.
+- The reward is binary multiple-choice correctness. When an answer is an A/B/C/D label, the reward helper resolves it against the supplied candidate list before comparing it with the model output.
+- Samples whose candidate group has no reward variation are skipped because their group-relative advantage is zero.
+- Training runtime depends heavily on video I/O, GPU, and the number of VLM calls. No fixed runtime is claimed.
 
-The checkpoint corresponds to the final training stage and should be loaded using a compatible MLP architecture.
+## Export the Android frame selector
 
-### 3.4 `export_all.py`
-
-This script exports the trained models into ONNX format for deployment.
-
-It exports three components:
-
-| Exported Model | Output File | Purpose |
-|---|---|---|
-| CLIP Vision Encoder | `clip_vision.onnx` | Visual feature extraction |
-| GRPO MLP Selector | `frame_selector.onnx` | Frame relevance scoring |
-| SmolVLM2 Language Model | `smolvlm2_lm.onnx` | Language generation |
-
-The script performs the following operations:
-
-1. Loads the locally stored CLIP model.
-2. Exports the CLIP vision encoder.
-3. Loads the trained GRPO MLP checkpoint.
-4. Exports the frame selection network.
-5. Loads SmolVLM2 and exports its language model decoder.
-6. Validates the exported models using ONNX Runtime.
-
-The exported files are stored in:
-
-```text
-onnx_exports/
-```
-
-ONNX export uses opset version 14.
-
-## 4. Technologies and Dependencies
-
-The codebase uses the following technologies:
-
-| Technology | Purpose |
-|---|---|
-| Python | Implementation and training |
-| PyTorch | Neural network development and training |
-| NumPy | Numerical operations |
-| Hugging Face Transformers | CLIP and SmolVLM2 models |
-| OpenCV | Video frame processing |
-| Pillow | Image processing |
-| ONNX | Model export |
-| ONNX Runtime | Export validation and inference |
-
-Install the main Python dependencies using:
+After training (or when using the compatible checkpoint), export only the MLP:
 
 ```bash
-pip install torch numpy transformers opencv-python pillow onnx onnxruntime
+python export_selector.py --checkpoint grpo_mlp_final.pt
 ```
 
-Use a compatible PyTorch installation for your hardware and CUDA environment.
-
-## 5. Training Requirements
-
-Before running the training notebook, ensure that the following resources are available:
-
-- MVBench dataset.
-- `action_antonym.json` and `egocentric_navigation.json`.
-- Corresponding video files.
-- Locally downloaded CLIP ViT-B/32 model.
-- Locally downloaded SmolVLM2-500M model.
-- The project-specific `components.py` module and model-loading utilities used by the notebook.
-
-The notebook uses local dataset and model paths. Update these paths according to your environment before execution.
-
-## 6. Running the Training Pipeline
-
-Open the notebook:
+The default output is:
 
 ```text
-nb2_training.ipynb
+onnx_exports/frame_selector.onnx
 ```
 
-Execute the notebook cells sequentially.
+The exporter checks that the ONNX interface matches the Android engine:
 
-The training process first trains the frame selector on action recognition data and subsequently fine-tunes it on navigation data.
+- Input name: `features`
+- Input shape: `[num_frames, 513]`
+- Output name: `scores`
 
-The final checkpoint is generated as:
+It also compares ONNX output against PyTorch output on a test batch.
 
-```text
-grpo_mlp_final.pt
-```
-
-## 7. Exporting Models to ONNX
-
-After training, configure the model and checkpoint paths in `export_all.py`.
-
-The script expects the patched `components.py` module and the required local model checkpoints to be available.
-
-Run:
+To copy the validated selector to the Android assets folder:
 
 ```bash
-python export_all.py
+python export_selector.py --checkpoint grpo_mlp_final.pt --copy-to-app
 ```
 
-After successful execution, the following files should be generated:
+**This command changes only `app/src/main/assets/frame_selector.onnx`.** It does not export or replace `clip_vision.onnx`, `vision_encoder_q4.onnx`, `decoder_model_merged_q4.onnx`, or `embed_tokens.bin`. Those files are part of the app-specific ONNX/tokenizer runtime and must be exported or prepared using the matching SmolVLM2 Android conversion process.
 
-```text
-onnx_exports/
-│
-├── clip_vision.onnx
-├── frame_selector.onnx
-└── smolvlm2_lm.onnx
+The repository currently tracks large Android model assets with Git LFS. Make sure Git LFS is installed and that the LFS objects have been pulled before building the app.
+
+## Important app integration check
+
+`SmolVLMEngine.kt` loads `tokenizer.json` from `app/src/main/assets/`. The current GitHub tree listing did not show that file, although the root README describes it. Verify that the tokenizer asset is present in your local checkout / release build before packaging the app. This training folder does not generate the tokenizer.
+
+## Tests
+
+Run the CPU smoke tests from this folder:
+
+```bash
+python -m unittest -v test_components.py
 ```
 
-The script also validates the exported models using ONNX Runtime.
+These tests cover the 513-feature MLP, fixed-size candidate generation, temporal-diversity selection, GRPO backpropagation and zero-variance rewards, MCQ answer matching, and motion-score normalization. They do not load the large VLM/CLIP weights or run the Android app.
 
-## 8. Role in Mozix.ai
+## Dependencies
 
-These files support the machine learning component of Mozix.ai.
+See `requirements.txt`. ONNX export validation requires `onnx` and `onnxruntime`.
 
-The GRPO-based frame selector acts as an optimization layer between video frame extraction and the Vision-Language Model.
+## What is intentionally not included
 
-By selecting a smaller set of informative frames, the system aims to:
+- MVBench videos or JSON data
+- Local SmolVLM2 / CLIP weight directories
+- Android app source (it remains under `app/`)
+- The app's full vision encoder, language decoder, or token-embedding export pipeline
+- The previous 512-feature selector implementation and its incompatible exporter
 
-- Reduce the number of visual tokens processed by the VLM.
-- Improve inference efficiency.
-- Reduce computational requirements.
-- Support deployment on resource-constrained Android devices.
-- Maintain strong visual question-answering performance.
-
-The trained selector and exported ONNX components are intended to support the broader on-device inference pipeline implemented in the main Mozix.ai application.
-
----
-
-**Note:** Model checkpoints, datasets, and local model directories must be configured separately. The training notebook and export script depend on project-specific components and model assets that are not all included in this folder.
