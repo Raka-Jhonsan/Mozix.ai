@@ -196,18 +196,32 @@ def compute_motion_scores(frames: Sequence[Image.Image]) -> np.ndarray:
 
 
 def get_clip_embeddings(frames: Sequence[Image.Image]) -> np.ndarray:
-    """Return L2-normalized (T, 512) CLIP visual-projection features."""
-    if clip_model is None or clip_processor is None:
+    """
+    Return L2-normalized (T, 512) CLIP visual-projection features.
+
+    Match the Android preprocessing: square resize to 224x224 with bilinear
+    filtering, RGB channel order, and CLIP mean/std normalization.
+    """
+    if clip_model is None:
         raise RuntimeError("Call load_models() before extracting CLIP features.")
 
+    mean = np.asarray([0.485, 0.456, 0.406], dtype=np.float32)[None, :, None, None]
+    std = np.asarray([0.229, 0.224, 0.225], dtype=np.float32)[None, :, None, None]
+    pixel_batches = []
+    for frame in frames:
+        resized = frame.convert("RGB").resize((224, 224), Image.Resampling.BILINEAR)
+        pixels = np.asarray(resized, dtype=np.float32) / 255.0
+        pixel_batches.append(pixels.transpose(2, 0, 1))
+    pixel_values = np.stack(pixel_batches, axis=0)
+    pixel_values = (pixel_values - mean) / std
+
     device = next(clip_model.parameters()).device
-    inputs = clip_processor(images=list(frames), return_tensors="pt").to(device)
+    inputs = torch.from_numpy(pixel_values).to(device=device, dtype=torch.float32)
     with torch.inference_mode():
-        vision_output = clip_model.vision_model(**inputs)
+        vision_output = clip_model.vision_model(pixel_values=inputs)
         features = clip_model.visual_projection(vision_output.pooler_output)
         features = F.normalize(features, dim=-1)
     return features.float().cpu().numpy()
-
 
 def get_clip_embeddings_with_motion(
     frames: Sequence[Image.Image],
