@@ -62,7 +62,7 @@ def main() -> None:
         input_names=["features"],
         output_names=["scores"],
         dynamic_axes={"features": {0: "num_frames"}, "scores": {0: "num_frames"}},
-        opset_version=17,
+        opset_version=14,
         do_constant_folding=True,
         dynamo=False,
     )
