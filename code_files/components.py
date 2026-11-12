@@ -429,8 +429,8 @@ def compute_mcq_reward(
     candidates: Optional[Sequence[str]] = None,
 ) -> float:
     """
-    Binary MCQ reward. If ground_truth is an option label (A-D), resolve it
-    against candidates before checking the generated answer. Single-letter
+    Binary MCQ reward. If ground_truth is an option label (A-D), accept an
+    explicit generated label or resolve it against candidates. Single-letter
     labels are not matched as arbitrary standalone articles in a sentence.
     """
     predicted = _normalise_answer(prediction)
@@ -439,25 +439,21 @@ def compute_mcq_reward(
         return 0.0
 
     if len(expected) == 1 and expected.isalpha():
+        label_pattern = (
+            r"(?<![a-z0-9])(?:option|answer|choice)\s*"
+            r"(?:is\s*)?(?:" + re.escape(expected) + r")(?![a-z0-9])"
+        )
+        bare_label = r"^\s*[\(\[]?" + re.escape(expected) + r"[\)\].:\s]*$"
+        if re.search(label_pattern, predicted) or re.fullmatch(bare_label, predicted):
+            return 1.0
         if candidates:
             option_index = ord(expected) - ord("a")
             if 0 <= option_index < len(candidates):
                 expected = _normalise_answer(candidates[option_index])
             else:
-                label_pattern = (
-                    r"(?<![a-z0-9])(?:option|answer|choice)\s*"
-                    r"(?:is\s*)?(?:" + re.escape(expected) + r")(?![a-z0-9])"
-                )
-                return 1.0 if re.search(label_pattern, predicted) else 0.0
+                return 0.0
         else:
-            label_pattern = (
-                r"(?<![a-z0-9])(?:option|answer|choice)\s*"
-                r"(?:is\s*)?(?:" + re.escape(expected) + r")(?![a-z0-9])"
-            )
-            bare_label = r"^\s*[\(\[]?" + re.escape(expected) + r"[\)\].:\s]*$"
-            return 1.0 if (
-                re.search(label_pattern, predicted) or re.fullmatch(bare_label, predicted)
-            ) else 0.0
+            return 0.0
 
     pattern = (
         r"(?<![a-z0-9])"
