@@ -39,7 +39,7 @@ It has 148,097 trainable parameters. During training, CLIP and SmolVLM2 are froz
 
 ### Feature details
 
-- **CLIP:** `CLIPModel.vision_model(...).pooler_output` followed by `visual_projection` and L2 normalization. Output shape: `(T, 512)`.
+- **CLIP:** RGB square resize to 224 × 224 with bilinear filtering, CLIP mean/std normalization, `CLIPModel.vision_model(...).pooler_output`, then `visual_projection` and L2 normalization. Output shape: `(T, 512)`. This follows the preprocessing in the Kotlin engine.
 - **Motion:** RGB absolute pixel difference between adjacent frames after nearest-neighbour resizing to at most 64 × 64; frame 0 receives 0; scores are normalized by the maximum. Output shape: `(T,)`.
 - **Combined features:** `[CLIP_512, motion_1]`. Output shape: `(T, 513)`.
 
