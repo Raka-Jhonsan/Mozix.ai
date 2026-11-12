@@ -145,6 +145,16 @@ The repository currently tracks large Android model assets with Git LFS. Make su
 
 `SmolVLMEngine.kt` loads `tokenizer.json` from `app/src/main/assets/`. The current GitHub tree listing did not show that file, although the root README describes it. Verify that the tokenizer asset is present in your local checkout / release build before packaging the app. This training folder does not generate the tokenizer.
 
+## Tests
+
+Run the CPU smoke tests from this folder:
+
+```bash
+python -m unittest -v test_components.py
+```
+
+These tests cover the 513-feature MLP, fixed-size candidate generation, temporal-diversity selection, GRPO backpropagation and zero-variance rewards, MCQ answer matching, and motion-score normalization. They do not load the large VLM/CLIP weights or run the Android app.
+
 ## Dependencies
 
 See `requirements.txt`. ONNX export validation requires `onnx` and `onnxruntime`.
