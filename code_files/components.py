@@ -45,7 +45,7 @@ def load_models(
     clip_path: str = CLIP_PATH,
 ) -> None:
     """Load and freeze the local SmolVLM2-500M and CLIP ViT-B/32 models."""
-    global smolvlm_processor, smolvlm_model, clip_processor, clip_model
+    global smolvlm_processor, smolvlm_model, clip_model
 
     try:
         from transformers import AutoProcessor, AutoModelForImageTextToText
