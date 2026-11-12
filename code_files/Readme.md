@@ -99,7 +99,7 @@ grpo_mlp_final_ep1.pt
 grpo_mlp_final.pt
 ```
 
-The final checkpoint is a PyTorch state dict for `FrameSelectorMLP(input_dim=513)`. The notebook includes an optional single-pipeline evaluation cell. A baseline/SMI comparison is not included here because the corresponding `query_and_baseline_clean.py` pipelines are not part of this repository.
+The final checkpoint is a PyTorch state dict for `FrameSelectorMLP(input_dim=513)`. The notebook includes an optional **in-sample sanity evaluation**; it is not a held-out benchmark. Use a separate validation split for reportable accuracy. A baseline/SMI comparison is not included here because the corresponding `query_and_baseline_clean.py` pipelines are not part of this repository.
 
 ### Training notes
 
