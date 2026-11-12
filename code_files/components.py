@@ -33,7 +33,6 @@ CLIP_PATH = "/DATA/teaching/DL_group45/models/CLIP-ViT-B-32-Local"
 
 smolvlm_processor = None
 smolvlm_model = None
-clip_processor = None
 clip_model = None
 
 FEATURE_DIM = 513
@@ -52,7 +51,7 @@ def load_models(
         from transformers import AutoProcessor, AutoModelForImageTextToText
     except ImportError:
         from transformers import AutoProcessor, AutoModel as AutoModelForImageTextToText
-    from transformers import CLIPProcessor, CLIPModel
+    from transformers import CLIPModel
 
     smolvlm_processor = AutoProcessor.from_pretrained(
         smolvlm_path, local_files_only=True, trust_remote_code=True
@@ -68,9 +67,6 @@ def load_models(
     for parameter in smolvlm_model.parameters():
         parameter.requires_grad_(False)
 
-    clip_processor = CLIPProcessor.from_pretrained(
-        clip_path, local_files_only=True
-    )
     clip_model = CLIPModel.from_pretrained(
         clip_path, local_files_only=True
     ).to(DEVICE)
